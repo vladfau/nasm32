@@ -1,0 +1,38 @@
+#!/bin/bash -x
+
+FILENAME=$1
+
+if [[ -z $FILENAME ]]; then
+	echo "no file passed";
+	exit 1;
+fi
+
+TMPDIR=`mktemp -d nasm32-workdir-XXXX`
+cp $FILENAME.asm $TMPDIR/
+cd $TMPDIR
+
+# prepare imports according elf conventions, not mingw ones
+SEDCOMMAND='sed -i'
+
+if [[ -n `which gsed` ]]; then
+	SEDCOMMAND='gsed -i';
+elif [[ `uname` == "Darwin" ]]; then
+	SEDCOMMAND='sed -i ""';
+fi
+
+# this will be updated according to the course
+$SEDCOMMAND 's/_printf/printf/g' $FILENAME.asm
+$SEDCOMMAND 's/_scanf/scanf/g' $FILENAME.asm
+$SEDCOMMAND 's/_main/main/g' $FILENAME.asm
+
+DOCKER_CMD="cd /tmp && nasm -f elf -l ${FILENAME}.lst ${FILENAME}.asm && gcc -m32 -o ${FILENAME} ${FILENAME}.o && cat"
+docker run -t -v $PWD:/tmp nasm32 bash -c "${DOCKER_CMD}" &
+
+sleep 3
+
+CONTAINER_ID=`docker ps | awk -F' ' '{print $1}' | grep -v CONTAINER | head -n 1`
+
+# for further removal
+echo $CONTAINER_ID > id
+
+docker exec -it $CONTAINER_ID bash
