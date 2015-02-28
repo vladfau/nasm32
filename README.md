@@ -34,9 +34,9 @@ Usage
 
 ### Before start
 
-First of all, you need to build `nasm32` container with Dockerfile included by running this command in the root of the repository:
+Pull image:
 
-`docker build -t nasm32 .`
+`docker pull vladfau/nasm32`
 
 ### run_nasm
 
