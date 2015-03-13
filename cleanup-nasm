@@ -1,9 +1,9 @@
 #!/bin/bash
 
-for d in `ls -1 | grep nasm32-workdir-*`; do
+for d in `ls -1 | grep nasm32-workdir`; do
 	echo $d
 	cd $d
   docker rm -f `cat id` || true
 	cd ..
-	rm -r $d
+	rm -fr $d
 done
