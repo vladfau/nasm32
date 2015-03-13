@@ -26,7 +26,7 @@ $SEDCOMMAND 's/_scanf/scanf/g' $FILENAME.asm
 $SEDCOMMAND 's/_main/main/g' $FILENAME.asm
 
 DOCKER_CMD="cd /tmp && nasm -f elf -l ${FILENAME}.lst ${FILENAME}.asm && gcc -m32 -o ${FILENAME} ${FILENAME}.o && cat"
-docker run -t -v $PWD:/tmp nasm32 bash -c "${DOCKER_CMD}" &
+docker run -t -v $PWD:/tmp vladfau/nasm32 bash -c "${DOCKER_CMD}" &
 
 sleep 3
 
