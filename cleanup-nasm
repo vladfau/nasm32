@@ -3,7 +3,7 @@
 for d in `ls -1 | grep nasm32-workdir`; do
 	echo $d
 	cd $d
-  docker rm -f `cat id` || true
-	cd ..
+    test -f id && docker rm -f `cat id`
+    cd ..
 	rm -fr $d
 done
