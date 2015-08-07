@@ -8,21 +8,21 @@ section .bss
     s: resd 1
 
 section .text
-    extern _scanf
-    extern _printf
-    global _main
-    _main:
+    extern scanf
+    extern printf
+    global main
+    main:
     push b
     push a
     push fmtin
-    call _scanf
+    call scanf
     add esp, 12
     mov eax, [a]
     add eax, [b]
     mov [s], eax
     push dword [s]
     push fmtout
-    call _printf
+    call printf
     add esp, 8
     xor eax, eax
     xor ecx, ecx

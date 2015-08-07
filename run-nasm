@@ -1,38 +1,195 @@
-#!/bin/bash -x
+#!/usr/bin/env python
+# pylint: disable=C0103
+"""
+    run-nasm is a CLI utility to assembly code with help of nasm (32-bit)
+    and run executables in isolated Docker environment
 
-FILENAME=$1
+    2015, Vlad Slepukhin
+"""
 
-if [[ -z $FILENAME ]]; then
-	echo "no file passed";
-	exit 1;
-fi
+import argparse
+import logging
+import sys
+import getpass
+import grp
+import os
+import shutil
+import subprocess
+import platform
+import tempfile
 
-TMPDIR=`mktemp -d nasm32-workdir-XXXX`
-cp $FILENAME.asm $TMPDIR/
-cd $TMPDIR
+## logging
+logger_format = '[%(levelname)s] %(message)s'
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+logging.basicConfig(stream=sys.stdout,
+                    format=logger_format,
+                    datefmt='%Y-%m-%d %H:%M:%S')
 
-# prepare imports according elf conventions, not mingw ones
-SEDCOMMAND='sed -i'
+## Args parsing
+parser = argparse.ArgumentParser(description='''This command copies
+                                 files you passed, creates makefile,
+                                 assembles it and runs in docker.
+                                 Default assembly command is:
+                                 nasm -f elf -l file.lst file.asm &&
+                                 gcc -m32 -o file file.o ''',
+                                 epilog='''Created by Vlad Slepukhin, 2015\n
+                                 https://github.com/ka2m/ssu-open-nasm32'''
+                                )
+parser.add_argument('files', type=str,
+                    help='files to assembly',
+                    nargs='*',
+                    metavar='file.nasm')
+parser.add_argument('-p', '--pargs', type=str,
+                    help='args to pass to compiled exeuctable',
+                    action='append')
+parser.add_argument('-v', '--verbose',
+                    help='verbose ouput',
+                    action='store_true')
+parser.add_argument('-S', '--save',
+                    help='save compiled executable to current directory',
+                    action='store_true')
+parser.add_argument('-s', '--sudo',
+                    help='run docker with sudo (default is true)',
+                    action='store_true')
+parser.add_argument('-l', '--ld',
+                    help='create executable with ld, do NOT link with gcc',
+                    action='store_true')
+parser.add_argument('-m', '--makefile',
+                    help='path to custom makefile (incompatible with -l)')
+parser.add_argument('-M', '--make',
+                    help='custom make command (must be quoted with "), '\
+                         '(incompatible with -l)',
+                    metavar='"make this"')
 
-if [[ -n `which gsed` ]]; then
-	SEDCOMMAND='gsed -i';
-elif [[ `uname` == "Darwin" ]]; then
-	SEDCOMMAND='sed -i ""';
-fi
 
-# this will be updated according to the course
-$SEDCOMMAND 's/_printf/printf/g' $FILENAME.asm
-$SEDCOMMAND 's/_scanf/scanf/g' $FILENAME.asm
-$SEDCOMMAND 's/_main/main/g' $FILENAME.asm
+args = parser.parse_args()
 
-DOCKER_CMD="cd /tmp && nasm -f elf -l ${FILENAME}.lst ${FILENAME}.asm && gcc -m32 -o ${FILENAME} ${FILENAME}.o && cat"
-docker run -t -v $PWD:/tmp vladfau/nasm32 bash -c "${DOCKER_CMD}" &
+## Checking arguments
 
-sleep 3
+if args.verbose:
+    logger.info('Setting logging to DEBUG mode')
+    logger.setLevel(logging.DEBUG)
+    logger.debug('Now we are in verbose mode')
 
-CONTAINER_ID=`docker ps | awk -F' ' '{print $1}' | grep -v CONTAINER | head -n 1`
+logger.info('Checking arguments')
+logger.debug('SUDO: %s', args.sudo)
+logger.debug('SAVE: %s', args.save)
+logger.debug('LD: %s', args.ld)
+logger.debug('Program ARGS: %s',
+             'none' if args.pargs is None else ' '.join(args.pargs))
+logger.debug('Makefile: %s',
+             'auto' if args.makefile is None else args.makefile)
+logger.debug('Sources: %s', ', '.join(args.files))
 
-# for further removal
-echo $CONTAINER_ID > id
+logger.debug('Check permissions to run docker (Linux-only)')
 
-docker exec -it $CONTAINER_ID bash
+if not args.sudo and platform.system() == 'Linux':
+    user = getpass.getuser()
+    logger.debug('User: %s', user)
+    try:
+        members = grp.getgrnam('docker').gr_mem
+        if user not in members and user != 'root':
+            logger.critical('Your user %s not in docker group. ' \
+                            'You cannot execute docker commands', user)
+
+            sys.exit(-3)
+    except KeyError:
+        logger.warning('Docker group not found. Cannot check docker '\
+                       'execution avialiability')
+
+if args.ld and args.make is not None:
+    logger.critical('--ld (-l) and --make (-M) cannot be used at one time')
+    sys.exit(-5)
+if args.ld and args.makefile is not None:
+    logger.critical('--ld (-l) and --makefile (-m) cannot be used at one time')
+    sys.exit(-1)
+if args.makefile and not os.path.isfile(args.makefile):
+    logger.critical('Custom makefile passed, but this file does not exists')
+    sys.exit(-2)
+if args.make and (args.make[0] != '"' or args.make[-1] != '"'):
+    logger.critical('Make command passed, but not quoted with "')
+    sys.exit(-6)
+
+if not args.makefile:
+    args.makefile = os.path.join(os.path.abspath(os.path.dirname(__file__)),
+                                 'Makefile')
+
+logger.debug('Check passed files')
+check_files = [os.path.isfile(x) for x in args.files]
+if False in check_files:
+    logger.critical('File(s) not found: %s',
+                    ' '.join([x for x in args.files
+                              if not check_files[args.files.index(x)]]))
+    sys.exit(-3)
+
+check_files = [x.endswith('.asm') for x in args.files]
+if False in check_files:
+    logger.critical('File(s) not ending with ".asm": %s',
+                    ' '.join([x for x in args.files
+                              if not check_files[args.files.index(x)]]))
+    sys.exit(-4)
+
+logger.info('Copying sources and Makefile to temporary directories')
+
+## Sources and Makefile are being copied to platform default temporary dir...
+
+temp_dir = tempfile.gettempdir()
+if len(args.files) > 1:
+    logger.warning('Compiling separate programs for each source'\
+                  ' as no custom Makefile passed, but multiple'\
+                  ' sources did')
+    logger.warning('Selecting last passed file as main executable')
+
+wd = tempfile.mkdtemp(prefix='.nasm32-', dir=tempfile.gettempdir())
+
+for wf in args.files:
+    shutil.copy(wf, wd)
+    logger.debug('COPY: %s -> %s', wf, wd)
+
+shutil.copy(args.makefile, wd)
+
+
+## Running docker
+
+# add sudo if required
+use_sudo = 'sudo ' if args.sudo else ''
+
+# add arguments to executable if any
+pargs = ' '.join(args.pargs) if args.pargs else ''
+if args.pargs:
+    pargs = ' ' + pargs
+
+# linking mode
+lm = ''
+if not args.make:
+    lm = 'ld' if args.ld else 'gcc'
+
+# select main file as resulting executable
+_, src = os.path.split(args.files[-1])
+src = src.split('.asm')[0]
+
+# actual command
+cmd = str('%sdocker run -it -v %s:/tmp '\
+          '-w /tmp vladfau/nasm32 /bin/sh -c'
+          % (use_sudo, wd)).split(' ')
+
+make = args.make[1:-1] if args.make else 'make src=%s mode=%s' % (src, lm)
+
+cmd.append('""%s; echo \'Running program:\'; ./%s%s""' %
+           (make, src, pargs))
+try:
+    logger.info('Running Docker')
+    logger.debug('CMD: %s', ' '.join(cmd))
+    _ = subprocess.Popen(cmd).communicate()[0]
+# this except is intended to catch ctrl-c signal during docker execution
+except KeyboardInterrupt:
+    pass
+finally:
+    if args.save:
+        logger.info('Saving resulting file to: %s',
+                    os.path.abspath(os.path.dirname(src)))
+        shutil.copy(os.path.join(wd, src),
+                    os.path.abspath(os.path.dirname(src)))
+    logger.info('Cleaning up')
+    shutil.rmtree(wd)
